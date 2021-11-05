@@ -19,6 +19,7 @@ FHIR = 'fhir'
 MONGO = 'mongo'
 
 STOP_JOB = '-STOP-'
+NUM_TRIES = 5
 
 file_extensions = {JSON:JSON, XMI:XMI, JSON_LITE:JSON, FHIR:FHIR}
 output_formats = [JSON, XMI, JSON_LITE, FHIR, MONGO]
@@ -40,11 +41,21 @@ class InputWorker(Thread):
                 break
 
             (text, params, metadata) = job
-            r = requests.post(self.rest_url, data=text, params=params)
-            json = r.json()
-            output_json = {'nlp':json, 'metadata': metadata}
-            self.out_queue.put(output_json)
-            self.in_queue.task_done()
+            tries = 0
+            while tries < NUM_TRIES:
+                tries += 1
+                r = requests.post(self.rest_url, data=text, params=params)
+                if r is not None and r.status_code == 200:
+                    json = r.json()
+                    output_json = {'nlp':json, 'metadata': metadata}
+                    self.out_queue.put(output_json)
+                    self.in_queue.task_done()
+                    break
+                else:
+                    if tries == NUM_TRIES:
+                        sys.stderr.write('Could not process row with metadata %s' % (str(metadata)))
+
+            
 
 # The other worker type reads the output from the NLP and stores it, either in a filesystem
 # or a database.
