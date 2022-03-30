@@ -7,7 +7,9 @@ import requests
 import gzip
 from json import dumps
 from time import sleep
-from os.path import join
+from os.path import join,exists
+from tqdm import tqdm
+import pandas as pd
 
 from threading import Thread
 from queue import Queue
@@ -53,7 +55,7 @@ class InputWorker(Thread):
                     break
                 else:
                     if tries == NUM_TRIES:
-                        sys.stderr.write('Could not process row with metadata %s' % (str(metadata)))
+                        sys.stderr.write('Could not process row with metadata %s\n' % (str(metadata)))
 
             
 
@@ -97,16 +99,20 @@ def parse_args():
     parser.add_argument('--max-notes', type=int, help='Max number of notes to process (for testing)', default=-1)
     parser.add_argument('--output-dir', help='Output dir (for file-based output formats', default=None)
     parser.add_argument('--num-threads', type=int, default=1, help='Number of workers to run (does not need to equal the number of containers (default=1)')
+    parser.add_argument('--resume', action="store_true", help='Whether to resume processing (i.e. check for existing files before processing')
     args = parser.parse_args()
     return args
 
 def main():
     args = parse_args()
+    compression = None
     # Trying to transparently handle the gzipped or non-gzipped case
     if args.input_file.endswith('.csv.gz'):
-        f = gzip.open(args.input_file, 'rt')
+        #f = gzip.open(args.input_file, 'rt')
+        compression = 'gzip'
     elif args.input_file.endswith('.csv'):
-        f = open(args.input_file, 'rt')
+        #f = open(args.input_file, 'rt')
+        compression = None
     else:
         raise Exception('Input file must end with .csv[.gz]')
 
@@ -133,21 +139,30 @@ def main():
     writer = OutputWorker(output_queue, args)
     writer.start()
 
-    with f:
-        csvreader = csv.DictReader(f)
-        for row_ind, row in enumerate(csvreader):
-            # check whether the user specified for an early exit (usually for testing purposes)
-            if args.max_notes > 0 and row_ind >= args.max_notes:
-                print('Exiting after %d notes due to input argument' % (args.max_notes))
-                break
+    #csvreader = csv.DictReader(f)
+    with pd.read_csv(args.input_file, chunksize=1000, compression=compression) as reader:
+        for chunk in tqdm(reader):
+            for row in chunk.iterrows():
+                row = row[1]
+                #for row_ind, row in enumerate(tqdm(csvreader)):
+                # check whether the user specified for an early exit (usually for testing purposes)
+                if args.max_notes > 0 and row_ind >= args.max_notes:
+                    print('Exiting after %d notes due to input argument' % (args.max_notes))
+                    break
 
-            while job_queue.full():
-                # no need to put all this data into memory if we already have 100 notes queued up.
-                sleep(1)
+                while job_queue.full():
+                    # no need to put all this data into memory if we already have 100 notes queued up.
+                    sleep(1)
 
-
-            text = row.pop('TEXT')
-            job_queue.put( (text, params, row) )
+                text = row.pop('TEXT')
+                if args.resume:
+                    row_id = row['ROW_ID']
+                    if args.output_format in ['json', 'xmi', 'json-lite', 'fhir']:
+                        of_name = join(args.output_dir, '%s.%s' % (row_id, file_extensions[args.output_format]))
+                        if exists(of_name):
+                            continue
+                
+                job_queue.put( (text, params, dict(row)) )
 
     # after we've pushed all the jobs to the workers add the stop job so they know when to exit.
     for worker_ind, worker in enumerate(workers):
